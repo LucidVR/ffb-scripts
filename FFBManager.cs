@@ -29,6 +29,7 @@ public class FFBManager : MonoBehaviour
 
     private void Start()
     {
+        Debug.Log(Marshal.SizeOf(new VRFFBInput(500,500,500,500,500, ETrackedControllerRole.LeftHand)));
         _playerGameObject = GameObject.Find("Player");
         
         Player _player = _playerGameObject.GetComponent<Player>();
@@ -51,6 +52,11 @@ public class FFBManager : MonoBehaviour
     {
         SetFFBFromInteractable(_leftHand, ETrackedControllerRole.LeftHand, ref _hasPrimedLeft);
         SetFFBFromInteractable(_rightHand, ETrackedControllerRole.RightHand, ref _hasPrimedRight);
+    }
+
+    private void OnApplicationQuit()
+    {
+        _ffbProvider.Close();
     }
 
     private void SetFFBFromInteractable(Hand hand, ETrackedControllerRole handedness, ref bool hasPrimed)
@@ -82,7 +88,8 @@ public class FFBManager : MonoBehaviour
         }
     }
 }
-[StructLayout(LayoutKind.Sequential, Pack = 1, CharSet = CharSet.Ansi)]
+
+[StructLayout(LayoutKind.Sequential)]
 public struct VRFFBInput
 {
     //Curl goes between 0-1000
@@ -95,11 +102,11 @@ public struct VRFFBInput
         this.pinkyCurl = pinkyCurl;
         this.handedness = handedness;
     }
-    public int thumbCurl;
-    public int indexCurl;
-    public int middleCurl;
-    public int ringCurl;
-    public int pinkyCurl;
+    public short thumbCurl;
+    public short indexCurl;
+    public short middleCurl;
+    public short ringCurl;
+    public short pinkyCurl;
 
     public ETrackedControllerRole handedness;
 };
@@ -157,15 +164,20 @@ class NamedPipesProvider
         _pipe.Dispose();
     }
 
-    public void Send(object request)
+    public void Send(VRFFBInput input)
     {
         if (_pipe.IsConnected)
         {
-            Debug.Log("Sent data to pipe");
-            var writer = new StreamWriter(_pipe);
-        
-            writer.Write(request);
-            writer.Flush();
+            int size = Marshal.SizeOf(input);
+            byte[] arr = new byte[size];
+
+            IntPtr ptr = Marshal.AllocHGlobal(size);
+            Marshal.StructureToPtr(input, ptr, true);
+            Marshal.Copy(ptr, arr, 0, size);
+            Marshal.FreeHGlobal(ptr);
+            
+            _pipe.Write(arr, 0, size);
+
         }
     }
 }
