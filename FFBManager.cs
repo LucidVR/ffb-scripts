@@ -1,23 +1,88 @@
-/***
- * This class should be instanced once per scene.
- */
-
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.IO;
+using System.IO.Pipes;
 using System.Runtime.InteropServices;
+using System.Threading;
 using UnityEngine;
+using UnityEngine.Events;
 using Valve.VR;
-
-//Simple enum to describe some common extension lengths for force feedback
-public enum FFBExtension
+using Valve.VR.InteractionSystem;
+public class FFBManager : MonoBehaviour
 {
-    Full = 1000,
-    Half = 500,
-    None = 0,
-}
+    
+    private Hand _leftHand;
+    private Hand _rightHand;
+    
+    private GameObject _playerGameObject;
 
-[StructLayout(LayoutKind.Sequential)]
+    private bool _hasPrimedLeft = false;
+    private bool _hasPrimedRight = false;
+
+    private FFBProvider _ffbProvider;
+
+    private void Awake()
+    {
+        _ffbProvider = new FFBProvider();
+    }
+
+    private void Start()
+    {
+        _playerGameObject = GameObject.Find("Player");
+        
+        Player _player = _playerGameObject.GetComponent<Player>();
+
+        foreach(Hand hand in _player.hands)
+        {
+            switch (hand.handType)
+            {
+                case SteamVR_Input_Sources.LeftHand:
+                    _leftHand = hand;
+                    break;
+                case SteamVR_Input_Sources.RightHand:
+                    _rightHand = hand;
+                    break;
+            }
+        }
+    }
+
+    private void Update()
+    {
+        SetFFBFromInteractable(_leftHand, ETrackedControllerRole.LeftHand, ref _hasPrimedLeft);
+        SetFFBFromInteractable(_rightHand, ETrackedControllerRole.RightHand, ref _hasPrimedRight);
+    }
+
+    private void SetFFBFromInteractable(Hand hand, ETrackedControllerRole handedness, ref bool hasPrimed)
+    {
+        if (hand.hoveringInteractable)
+        {
+            if (!hasPrimed)
+            {
+                hasPrimed = true;
+
+                SteamVR_Skeleton_Pose_Hand skeletonPose = handedness == ETrackedControllerRole.LeftHand
+                    ? hand.hoveringInteractable.skeletonPoser.skeletonMainPose.leftHand
+                    : hand.hoveringInteractable.skeletonPoser.skeletonMainPose.rightHand;
+                
+                Debug.Log("Primed force feedback" + (handedness == ETrackedControllerRole.LeftHand ? "left hand" : "right hand"));
+                _ffbProvider.SetFFB(new VRFFBInput(500, 500, 500, 500, 500, handedness)); 
+            }
+        }
+        else
+        {
+            if (hasPrimed)
+            {
+                Debug.Log("Relaxed force feedback for " + (handedness == ETrackedControllerRole.LeftHand ? "left hand" : "right hand"));
+                //If we've previously primed and the object has stopped being hovered over, relax the force feedback
+                _ffbProvider.RelaxFFB(handedness);
+                hasPrimed = false;
+            }
+            
+        }
+    }
+}
+[StructLayout(LayoutKind.Sequential, Pack = 1, CharSet = CharSet.Ansi)]
 public struct VRFFBInput
 {
     //Curl goes between 0-1000
@@ -30,93 +95,77 @@ public struct VRFFBInput
         this.pinkyCurl = pinkyCurl;
         this.handedness = handedness;
     }
-    public short thumbCurl;
-    public short indexCurl;
-    public short middleCurl;
-    public short ringCurl;
-    public short pinkyCurl;
+    public int thumbCurl;
+    public int indexCurl;
+    public int middleCurl;
+    public int ringCurl;
+    public int pinkyCurl;
 
     public ETrackedControllerRole handedness;
 };
 
-public class FFBManager : MonoBehaviour
+class FFBProvider
 {
-    private ulong _bufferPtr;
-
-    private void Awake()
+    private NamedPipesProvider _namedPipeProvider;
+    public FFBProvider()
     {
-        OpenBuffer();
-    }
-
-    public void TriggerForceFeedback(VRFFBInput input)
-    {
-        //IOBuffer does some weird things with ptrs, so allocate and copy the object to unmanaged memory
-        IntPtr pnt = Marshal.AllocHGlobal(Marshal.SizeOf(input));
-        try
-        {
-            //Get the ptr to the object
-            Marshal.StructureToPtr(input, pnt, false);
-            
-            //Write to buffer
-            EIOBufferError err = OpenVR.IOBuffer.Write(_bufferPtr, pnt, (uint) Marshal.SizeOf(typeof(VRFFBInput)));
-
-            if (err != EIOBufferError.IOBuffer_Success)
-            {
-                Debug.LogError("Error writing to force feedback buffer");
-            }
-            else
-            {
-                Debug.Log("Success writing to buffer");
-            }
-        }
-        catch (Exception e)
-        {
-            Debug.LogError(e.Message);
-        }
-        finally
-        {
-            //Then discard it
-            Marshal.FreeHGlobal(pnt);
-        }
+        _namedPipeProvider = new NamedPipesProvider();
         
+        _namedPipeProvider.Connect();
     }
-
-    private void OpenBuffer()
+   
+    public void SetFFB(VRFFBInput input)
     {
-        EIOBufferError err = OpenVR.IOBuffer.Open("/extensions/ffb/provider", EIOBufferMode.Create|EIOBufferMode.Write, (uint) Marshal.SizeOf(typeof(VRFFBInput)), 2, ref _bufferPtr);
-
-        if (err == EIOBufferError.IOBuffer_Success)
-        {
-            Relax(); 
-        }
-        else
-        {
-            Debug.LogError("Error opening force feedback buffer, is it already opened?");
-        }
-    }
-
-    public void Relax()
-    {
-        this.TriggerForceFeedback(new VRFFBInput(0, 0, 0, 0, 0, ETrackedControllerRole.LeftHand));
-        this.TriggerForceFeedback(new VRFFBInput(0, 0, 0, 0, 0, ETrackedControllerRole.RightHand));
+        Debug.Log(Marshal.SizeOf(input));
+        _namedPipeProvider.Send(input);
     }
     
-    //This method doesn't work for some reason
-    public void CloseBuffer()
+    public void RelaxFFB(ETrackedControllerRole hand)
     {
-        EIOBufferError err = OpenVR.IOBuffer.Close(_bufferPtr);
-        if (err != EIOBufferError.IOBuffer_Success)
-        {
-            Debug.Log("Failed to close force feedback buffer");
-        }
-        else
-        {
-            Debug.Log("Success closing force feedback buffer");
-        }
+        SetFFB(new VRFFBInput(0,0,0,0,0, hand));
     }
 
-    public void OnDestroy()
+    public void Close()
     {
-        CloseBuffer();
+        _namedPipeProvider.Disconnect();
+    }
+}
+
+class NamedPipesProvider
+{
+    public string pipeName = "application/ffb";
+
+    private NamedPipeClientStream _pipe;
+
+    private bool _connected;
+    
+    public NamedPipesProvider()
+    {
+        _pipe = new NamedPipeClientStream(pipeName);
+        _connected = false;
+    }
+
+    public void Connect()
+    {
+        Debug.Log("Connecting to pipe");
+        _pipe.Connect();
+        Debug.Log("Successfully connected to pipe");
+    }
+
+    public void Disconnect()
+    {
+        _pipe.Dispose();
+    }
+
+    public void Send(object request)
+    {
+        if (_pipe.IsConnected)
+        {
+            Debug.Log("Sent data to pipe");
+            var writer = new StreamWriter(_pipe);
+        
+            writer.Write(request);
+            writer.Flush();
+        }
     }
 }
